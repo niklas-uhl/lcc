@@ -15,10 +15,12 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
-#define GRAPH_GENERATOR_MPI
-#include "../../generator/make_graph.h"
+#include <limits.h>
+#include "lcc_api.h"
 
+#ifndef LCC_NO_CONFIG_H // katric: the CMake build passes its macros on the command line
 #include "config.h"
+#endif
 
 #include <sched.h>
 
@@ -41,7 +43,7 @@
 #endif
 
 #ifdef ARM_A64FX
-double libpgt_g_hrtimer_startvalue = 0;
+static double libpgt_g_hrtimer_startvalue = 0;
 #endif 
 
 #define VTAG(t) (0 * ntask + (t))
@@ -53,45 +55,53 @@ double libpgt_g_hrtimer_startvalue = 0;
 #define BIN_NUM 16
 
 #define LIMIT 1
-uint64_t N = 0; /* number of vertices: N */
-LOCINT row_bl;  /* adjacency matrix rows per block: N/(RC) */
-LOCINT col_bl;  /* adjacency matrix columns per block: N/C */
-LOCINT row_pp;  /* adjacency matrix rows per proc: N/(RC) * C = N/R */
-uint64_t degree_reduction_time = 0;
-uint64_t sort_time = 0;
-int C = 0;
-int R = 0;
-int gmyid;
-int myid;
-int gntask;
-int ntask;
+
+/* katric: state of the library calls (lcc_api.h) */
+static uint64_t lcc_cache_size = 8589934592ULL;
+static uint64_t lcc_local_triangles = 0;
+static LOCINT *lcc_col = NULL;
+static LOCINT *lcc_row = NULL;
+static LOCINT *lcc_degree = NULL;
+static float *lcc_dist = NULL;
+static uint64_t N = 0; /* number of vertices: N */
+static LOCINT row_bl;  /* adjacency matrix rows per block: N/(RC) */
+static LOCINT col_bl;  /* adjacency matrix columns per block: N/C */
+static LOCINT row_pp;  /* adjacency matrix rows per proc: N/(RC) * C = N/R */
+static uint64_t degree_reduction_time = 0;
+static uint64_t sort_time = 0;
+static int C = 0;
+static int R = 0;
+static int gmyid;
+static int myid;
+static int gntask;
+static int ntask;
 static int nthreads = 1;
-int undirected = 1;
-int analyze_degree = 0;
+static int undirected = 1;
+static int analyze_degree = 0;
 
-uint64_t nglobal_ed;
-int scale = 0;
-int edgef = 0;
-int ned = 0;
+static uint64_t nglobal_ed;
+static int scale = 0;
+static int edgef = 0;
+static int ned = 0;
 
-int heuristic = 0;
+static int heuristic = 0;
 
-int myrow;
-int mycol;
-int pmesh[MAX_PROC_I][MAX_PROC_J];
-MPI_Comm MPI_COMM_CLUSTER;
+static int myrow;
+static int mycol;
+static int pmesh[MAX_PROC_I][MAX_PROC_J];
+static MPI_Comm MPI_COMM_CLUSTER;
 
-short debug = 0;
+static short debug = 0;
 
-LOCINT *reach = NULL;
-FILE *outdebug = NULL;
-LOCINT loc_count = 0;
-STATDATA *mystats = NULL;
-unsigned int outId;
-char strmesh[10];
-char cmdLine[256];
+static LOCINT *reach = NULL;
+static FILE *outdebug = NULL;
+static LOCINT loc_count = 0;
+static STATDATA *mystats = NULL;
+static unsigned int outId;
+static char strmesh[10];
+static char cmdLine[256];
 
-MPI_Comm Row_comm, Col_comm;
+static MPI_Comm Row_comm, Col_comm;
 
 static void freeMem(void *p) {
   if (p)
@@ -111,7 +121,7 @@ static void prexit(const char *fmt, ...) {
   exit(EXIT_FAILURE);
 }
 
-void *Malloc(size_t sz) {
+static void *Malloc(size_t sz) {
 
   void *ptr;
 
@@ -124,6 +134,7 @@ void *Malloc(size_t sz) {
   return ptr;
 }
 
+#ifdef __linux__ // katric: cpu_set_t is Linux only (unused since main() is gone)
 static char *cpuset_to_cstr(cpu_set_t *mask, char *str)
 {
 char *ptr = str;
@@ -152,12 +163,13 @@ ptr -= entry_made;
 *ptr = 0;
 return(str);
 }
+#endif
 
 
 /*
  * Print statistics
  */
-void prstat(uint64_t val, const char *msg, int det) {
+static void prstat(uint64_t val, const char *msg, int det) {
 
   if(debug == 0)
     return;
@@ -382,17 +394,7 @@ static uint64_t read_graph(int myid, int ntask, const char *fpath,
 /*
  * Generate RMAT graph calling make_graph function
  */
-static uint64_t gen_graph(int scale, int edgef, uint64_t **ed) {
-
-  uint64_t ned;
-  double initiator[4] = {.57, .19, .19, .05};
-
-  make_graph(scale, (((int64_t)1) << scale) * edgef, 23, 24, initiator,
-             (int64_t *)&ned, (int64_t **)ed, MPI_COMM_CLUSTER);
-  *ed = mirror(*ed, &ned);
-
-  return ned;
-}
+/* katric: gen_graph() (graph500 RMAT generator for the old main) removed */
 
 static int cmpedge_1d(const void *p1, const void *p2) {
   uint64_t *l1 = (uint64_t *)p1;
@@ -699,7 +701,7 @@ static void print_degrees(FILE *outf, LOCINT ned, LOCINT *ed, LOCINT *in_degree,
   }
 }
 
-void init_rand(int mode) {
+static void init_rand(int mode) {
   uint64_t seed = DEFAULT_SEED;
   if (mode == 1) {
     struct timeval time;
@@ -964,7 +966,7 @@ static void print_stats(double *teps, int n) {
   return;
 }
 
-void usage(const char *pname) {
+static void usage(const char *pname) {
   prexit(
       "Usage:\n"
       "-p RxC"
@@ -991,7 +993,7 @@ void usage(const char *pname) {
 }
 
 
-LOCINT bin_search(LOCINT *arr, int l, int r, LOCINT x){
+static LOCINT bin_search(LOCINT *arr, int l, int r, LOCINT x){
 	while (l <= r) {
 		int m = l + (r - l) / 2;
 		if (arr[m] == x) return 1;
@@ -1001,7 +1003,7 @@ LOCINT bin_search(LOCINT *arr, int l, int r, LOCINT x){
         return 0;
 }
 
-void set_clampi_params(uint64_t ht_size, uint64_t mem_size) {
+static void set_clampi_params(uint64_t ht_size, uint64_t mem_size) {
   char *mem_str = (char*) malloc(24);
   char *ht_str = (char*) malloc(24);
 
@@ -1014,12 +1016,12 @@ void set_clampi_params(uint64_t ht_size, uint64_t mem_size) {
 }
 
 // user-defined eviction score
-double own_score(double penalty, double lasthit, double val) {
+static double own_score(double penalty, double lasthit, double val) {
   return val;
 }
 
 #ifdef HAVE_SIMD
-void lcc_func_bin_simd(LOCINT *col, LOCINT *row, float *output) {
+static void lcc_func_bin_simd(LOCINT *col, LOCINT *row, float *output) {
   LOCINT i = 0;
   int dest_get;
   LOCINT jj = 0;
@@ -1074,7 +1076,7 @@ void lcc_func_bin_simd(LOCINT *col, LOCINT *row, float *output) {
 
 #ifdef HAVE_CLAMPI
   // configure clampi cache size
-  uint64_t cache_size = 8589934592;
+  uint64_t cache_size = lcc_cache_size; // katric: was 8589934592 (8 GiB), now lcc_options.clampi_cache_size
   uint64_t index_size = N * 8 * 0.4;
   uint64_t row_mem_size = cache_size - index_size;
   uint64_t non_local_size = (nglobal_ed - ned) * 8;
@@ -1294,6 +1296,7 @@ void lcc_func_bin_simd(LOCINT *col, LOCINT *row, float *output) {
       } else {
         for (c = 0; c < nthreads; c++)
           counter += reduction[c];
+        lcc_local_triangles += counter; // katric: triangles at vertex i (summed: 3 x the global count)
         lcc = (float)counter / (float)(row_offset * (row_offset - 1) / (1 + undirected));  // / (float)(row_offset * (row_offset - 1));
       }    
       
@@ -1341,7 +1344,7 @@ void lcc_func_bin_simd(LOCINT *col, LOCINT *row, float *output) {
 #endif  //END HAVE_SIMD
 
 #ifndef HAVE_SIMD
-void lcc_func(LOCINT *col, LOCINT *row, float *output) {
+static void lcc_func(LOCINT *col, LOCINT *row, float *output) {
   LOCINT i = 0;
   if (R == 1) {
     int dest_get;
@@ -1497,469 +1500,156 @@ void lcc_func(LOCINT *col, LOCINT *row, float *output) {
 }
 #endif
 
-int main(int argc, char *argv[]) {
 
-  int s, t, gread = -1;
-  scale = 20;
-  edgef = 16;
-  short dump = 0;
+/*
+ * katric: the library calls (lcc_api.h), replacing main(). They follow main()'s steps in order; what is left out is
+ * reading/generating the graph, the option parsing, the output and debugging.
+ */
+void lcc_setup(uint64_t n, const lcc_options *options) {
+  static int clampi_initialized = 0;
   int64_t i, j;
-  uint64_t nbfs = 1;
-  LOCINT n, l, rem_ed = 0;
-  nglobal_ed = 0;
-
-  uint64_t *edge = NULL;
-  uint64_t *rem_edge = NULL;
-
-  LOCINT *col = NULL;
-  LOCINT *row = NULL;
-
-  LOCINT *degree = NULL; // Degree for all vertices in the same column
-
-  LOCINT *deg = NULL;
-
-  MPI_Comm MPI_COMM_COL;
-
-
-  int cntask;
-  char *gfile = NULL, *p = NULL, *ofile = NULL, *dump_path = NULL;
-  int c;
-
-  int threadnum;
-  char clbuf[7 * CPU_SETSIZE], hnbuf[64];
-  memset(clbuf, 0, sizeof(clbuf));
-  memset(hnbuf, 0, sizeof(hnbuf));
-  (void)gethostname(hnbuf, sizeof(hnbuf));
-  cpu_set_t coremask;
-
-  TIMER_DEF(0);
-
-  float *dist_lcc = NULL; // Local Cluster Coef... Store in scan mode
-
-  MMPI_INIT(&argc, &argv);
-  MPI_Barrier(MPI_COMM_WORLD);
-#ifdef HAVE_LIBLSB
-  LSB_Init("llc", 0);
-#endif
-
-#ifdef HAVE_CLAMPI
-  cl_init();
-#endif
 
   MPI_Comm_rank(MPI_COMM_WORLD, &gmyid);
   MPI_Comm_size(MPI_COMM_WORLD, &gntask);
+  lcc_cache_size = options->clampi_cache_size;
+  heuristic = options->degree_reduction ? 1 : 0;
+  undirected = 1;
 
-  if (argc == 1) {
-    usage(argv[0]);
-    exit(EXIT_FAILURE);
-  }
-  outId = time(NULL);
-
-  int wr, pl = 0, limit = sizeof(cmdLine);
-  wr = snprintf(cmdLine + pl, limit, "MPI Tasks %d\n", gntask);
-  if (wr < 0)
-    exit(EXIT_FAILURE);
-  limit -= wr;
-  pl += wr;
-  for (i = 0; i < argc; i++) {
-    wr = snprintf(cmdLine + pl, limit, " %s", argv[i]);
-    if (wr < 0)
-      exit(EXIT_FAILURE);
-    limit -= wr;
-    pl += wr;
-  }
-  snprintf(cmdLine + pl, limit, "\n");
-
-  if (gmyid == 0) {
-    fprintf(stdout, "%s\n", cmdLine);
-  }
-
-  while ((c = getopt(argc, argv, "o:p:ahDd:Uf:n:r:S:E:N:H:")) != EOF) {
-#define CHECKRTYPE(exitval, opt)                                               \
-  {                                                                            \
-    if (exitval == gread)                                                      \
-      prexit("Unexpected option -%c!\n", opt);                                 \
-    else                                                                       \
-      gread = !exitval;                                                        \
-  }
-    switch (c) {
-    // BC approx  c param is the costanst used in Bader stopping cretierion
-    case 'H':
-      if (0 == sscanf(optarg, "%d", &heuristic))
-        prexit("Invalid Heuristic Option (-H): %s\n", optarg);
-      if (heuristic >= 2)
-        prexit("H2 and H3 heuristics are not implemented(-H): %s\n", optarg);
-      break;
-    // heuristic selection
-    case 'o':
-      ofile = strdup(optarg);
-      break;
-    case 'p':
-      strncpy(strmesh, optarg, 10);
-      p = strtok(optarg, "x");
-      if (!p)
-        prexit("Invalid proc mesh field.\n");
-      if (0 == sscanf(p, "%d", &R))
-        prexit("Invalid number of rows for proc mesh (-p): %s\n", p);
-      p = strtok(NULL, "x");
-      if (!p)
-        prexit("Invalid proc mesh field.\n");
-      if (0 == sscanf(p, "%d", &C))
-        prexit("Invalid number of columns for proc mesh (-p): %s\n", p);
-      break;
-    case 'd':
-      // Dump graph after degree reduction
-      dump = 1;
-      dump_path = strdup(optarg);
-      break;
-    case 'D':
-      // DEBUG
-      debug = 1;
-      break;
-    case 'f':
-      CHECKRTYPE(0, 'f')
-      gfile = strdup(optarg);
-      break;
-    case 'n':
-      CHECKRTYPE(0, 'n')
-      if (0 == sscanf(optarg, "%" PRIu64, &N))
-        prexit("Invalid number of vertices (-n): %s\n", optarg);
-      scale = log2(N);
-      break;
-    case 'S':
-      CHECKRTYPE(1, 'S')
-      if (0 == sscanf(optarg, "%d", &scale))
-        prexit("Invalid scale (-S): %s\n", optarg);
-      N = ((uint64_t)1) << scale;
-      break;
-    case 'E':
-      CHECKRTYPE(1, 'E')
-      if (0 == sscanf(optarg, "%d", &edgef))
-        prexit("Invalid edge factor (-S): %s\n", optarg);
-      break;
-    case 'U':
-      // Undirected
-      undirected = 0;
-      break;
-    case 'a':
-      // Degree analysis
-      analyze_degree = 1;
-      break;
-    case 'h':
-    case '?':
-    default:
-      usage(argv[0]);
-      exit(EXIT_FAILURE);
-    }
-#undef CHECKRTYPE
-  }
-
-  if (gread) {
-    if (!gfile || !N)
-      prexit("Graph file (-f) and number of vertices (-n)"
-             " must be specified for file based bfs.\n");
-  }
-
+  /* 1D as in the paper (-p 1xp): one mesh row, a block of N/p consecutive vertices (columns) per rank. LCC requires
+   * N % (R * C) == 0, so N is rounded up (the added vertices are isolated). */
+  R = 1;
+  C = gntask;
+  N = ((n + C - 1) / C) * C;
+  if (N == 0)
+    N = C;
   if (0 >= R || MAX_PROC_I < R || 0 >= C || MAX_PROC_J < C)
-    prexit("R and C must be in range [1,%d] and [1,%d], respectively.\n",
-           MAX_PROC_I, MAX_PROC_J);
-
-  if (0 != N % (R * C))
-    prexit("N must be multiple of both R and C.\n");
-
+    prexit("R and C must be in range [1,%d] and [1,%d], respectively.\n", MAX_PROC_I, MAX_PROC_J);
+  if (N > UINT32_MAX)
+    prexit("LCC uses 32-bit vertex ids: N = %" PRIu64 " is too large.\n", N);
   ntask = R * C;
-  cntask = gntask / ntask;
-  if (gntask % ntask) {
-    fprintf(stderr, "Invalid configuration: total number of task is %d, "
-                    "cluster size is %d\n",
-            gntask, ntask);
-    MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
-  }
 
-  if (heuristic >= 2) {
-    prexit("\n\nH2 and H3 are not implemented(-H): %d\n", heuristic);
-    MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
-  }
-
-#ifndef _LARGE_LVERTS_NUM
-  if ((N / R) > UINT32_MAX) {
-    prexit("Number of vertics per processor too big (%" LOCPRI "), please"
-           "define _LARGE_LVERTS_NUM macro in %s.\n",
-           (N / R), __FILE__);
-  }
-#endif
-
-  int color = gmyid / ntask;
-  MPI_Comm_split(MPI_COMM_WORLD, color, gmyid, &MPI_COMM_CLUSTER);
+  MPI_Comm_split(MPI_COMM_WORLD, 0, gmyid, &MPI_COMM_CLUSTER);
   MPI_Comm_rank(MPI_COMM_CLUSTER, &myid);
   MPI_Comm_size(MPI_COMM_CLUSTER, &ntask);
-
   myrow = myid / C;
   mycol = myid % C;
-
-  MPI_Comm_split(MPI_COMM_WORLD, (myrow * C) + mycol, gmyid, &MPI_COMM_COL);
 
   row_bl = N / (R * C); /* adjacency matrix rows per block:    N/(RC) */
   col_bl = N / C;       /* adjacency matrix columns per block: N/C */
   row_pp = N / R;       /* adjacency matrix rows per proc:     N/(RC)*C = N/R */
 
-  // if ((gmyid == 0) && (debug == 1)) {
-  //   char fname[MAX_LINE];
-  //   snprintf(fname, MAX_LINE, "%s_%d.log", "debug", gmyid);
-  //   outdebug = Fopen(fname, "w");
-  // }
-
-  char *resname = NULL;
-
-  if (gmyid == 0) {
-    fprintf(stdout, "\n\n****** DEVEL VERSION ******\n\n");
-    fprintf(stdout, "Total number of vertices (N): %" PRIu64 "\n", N);
-    fprintf(stdout, "Processor mesh rows (R): %d\n", R);
-    fprintf(stdout, "Processor mesh columns (C): %d\n", C);
-    if (gread) {
-      fprintf(stdout, "Reading graph from file: %s\n", gfile);
-    } else {
-      fprintf(stdout, "RMAT graph scale: %d\n", scale);
-      fprintf(stdout, "RMAT graph edge factor: %d\n", edgef);
-    }
-    fprintf(stdout, "\n\n");
-    if (heuristic == 0) {
-      fprintf(stdout, "HEURISTICs: OFF: %d\n", heuristic);
-
-    } else if (heuristic == 1) {
-      fprintf(stdout, "HEURISTICs: 1-degree reduction ON: %d\n", heuristic);
-    }
-
-    fprintf(stdout, "\n***************************\n\n");
-  }
-
-  if (NULL != ofile) {
-    fprintf(stdout, "Result written to file: %s\n", ofile);
-    resname = (char *)malloc((sizeof(ofile) + MAX_LINE) * sizeof(*resname));
-    sprintf(resname, "%s_%dX%d_%d.log", ofile, R, C, gmyid);
-  }
-  MPI_Barrier(MPI_COMM_WORLD);
-
-  /* fill processor mesh */
   memset(pmesh, -1, sizeof(pmesh));
   for (i = 0; i < R; i++)
     for (j = 0; j < C; j++)
       pmesh[i][j] = i * C + j;
 
-  if (myid == 0)
-    fprintf(stdout, "%s graph...", gread ? "Reading" : "Generating");
-  TIMER_START(0);
-  if (gread)
-    ned = read_graph(myid, ntask, gfile, &edge); // Read from file
-  else
-    ned = gen_graph(scale, edgef, &edge); // Generate RMAT
-  TIMER_STOP(0);
-  if (myid == 0)
-    fprintf(stdout, " done in %f secs\n", TIMER_ELAPSED(0) / 1.0E+6);
-  prstat(ned, gread ? "Edges read from file:" : "Edges generated:", 1);
+  /* main() split these after building the CSC; they do not depend on it */
+  MPI_Comm_split(MPI_COMM_CLUSTER, myrow, mycol, &Row_comm);
+  MPI_Comm_split(MPI_COMM_CLUSTER, mycol, myrow, &Col_comm);
+
+#ifdef HAVE_CLAMPI
+  if (!clampi_initialized) {
+    cl_init();
+    clampi_initialized = 1;
+  }
+#endif
+#ifdef HAVE_SIMD
+#pragma omp parallel
+  {
+#pragma omp single
+    nthreads = omp_get_num_threads();
+  }
+#endif
+}
+
+void lcc_preprocess(uint64_t *edge, uint64_t nedges) {
+  uint64_t *rem_edge = NULL;
+  LOCINT rem_ed = 0;
+  LOCINT *deg = NULL;
+  uint64_t n, l;
+  int s, t;
+
+  if (nedges > INT_MAX)
+    prexit("LCC counts local edges in an int: %" PRIu64 " edges on rank %d.\n", nedges, gmyid);
+  ned = (int)nedges;
 
   if (heuristic != 0) {
     l = norm_graph(edge, ned, NULL);
-    prstat(ned - l, "First Multi-edges removed:", 1);
     ned = l;
   }
-
-  // 1 DEGREE PREPROCESSING TIMING ON
   if (heuristic == 1) {
-    if (gmyid == 0)
-      fprintf(stdout, "Degree reduction graph (%d)...\n", heuristic);
-    TIMER_START(0);
-    // DEGREE REDUCTION - Edge Based
+    /* DEGREE REDUCTION - Edge Based */
     ned = degree_reduction(myid, ntask, &edge, ned, &rem_edge, &rem_ed);
-    TIMER_STOP(0);
-    degree_reduction_time = TIMER_ELAPSED(0);
   }
 
-  if (dump > 0) {
-    if(1 < ntask) {
-      prexit("Exporting graph works only with a single task.");
-    }
-    fprintf(stdout, "Dump file to: /%s\n", dump_path);
-    dump_edges(edge, ned, dump_path);
-  }
-
-  // 2-D PARTITIONING
-  if (gmyid == 0)
-    fprintf(stdout, "Partitioning graph... ");
-  TIMER_START(0);
+  /* 2-D PARTITIONING */
   if (ntask > 1)
-    ned = part_graph(myid, ntask, &edge, ned, 2); // 2-D graph partitioning
+    ned = part_graph(myid, ntask, &edge, ned, 2);
   if (ntask > 1)
     rem_ed = part_graph(myid, ntask, &rem_edge, rem_ed, 2);
-  TIMER_STOP(0);
-  if (myid == 0)
-    fprintf(stdout, "task %d done in %f secs\n", gmyid,
-            TIMER_ELAPSED(0) / 1.0E+6);
-  prstat(ned, "Edges assigned after partitioning:", 1);
-// dump_edges(edge, ned,"Edges 2-D");
 #ifndef _LARGE_LVERTS_NUM
-  if (ned > UINT32_MAX) {
-    fprintf(stderr, "Too many vertices assigned to me. Change LOCINT\n");
-    exit(EXIT_FAILURE);
-  }
+  if ((uint64_t)ned > UINT32_MAX)
+    prexit("Too many vertices assigned to me. Change LOCINT\n");
 #endif
-  if (myid == 0)
-    fprintf(stdout, "task %d: Verifying partitioning...", gmyid);
-  TIMER_START(0);
-  for (n = 0; n < ned; n++) {
-    if (EDGE2PROC(edge[2 * n], edge[2 * n + 1]) != myid) {
-      fprintf(stdout, "[%d] error, received edge (%" PRIu64 ", %" PRIu64
-                      "), should have been sent to %d\n",
-              myid, edge[2 * n], edge[2 * n + 1],
-              EDGE2PROC(edge[2 * n], edge[2 * n + 1]));
+  for (n = 0; n < (uint64_t)ned; n++) {
+    if (EDGE2PROC(edge[2 * n], edge[2 * n + 1]) != myid)
       break;
-    }
   }
-  s = (n != ned);
+  s = (n != (uint64_t)ned);
   MPI_Allreduce(&s, &t, 1, MPI_INT, MPI_LOR, MPI_COMM_CLUSTER);
-  TIMER_STOP(0);
   if (t)
     prexit("Error in 2D decomposition.\n");
-  else if (myid == 0)
-    fprintf(stdout, "task %d done in %f secs\n", gmyid,
-            TIMER_ELAPSED(0) / 1.0E+6);
 
-  /* Graph has been partitioned correctly */
-  if (myid == 0)
-    fprintf(stdout, "task %d Removing multi-edges...", gmyid);
+  /* Normalize graph: remove loops and duplicate edges; also calculates degrees */
   deg = (LOCINT *)Malloc(row_pp * sizeof(*deg));
-
-  TIMER_START(0);
-  // Normalize graph: remove loops and duplicates edges cappi o loops?
-  // THIS ALSO CALCULATES DEGREES
   l = norm_graph(edge, ned, deg);
-  TIMER_STOP(0);
-  if (myid == 0)
-    fprintf(stdout, "task %d done in %f secs\n", gmyid,
-            TIMER_ELAPSED(0) / 1.0E+6);
-  prstat(ned - l, "Multi-edges removed:", 1);
   ned = l;
 
-  // relabel_graph(edge, ned);
-  // get total number of remaining edges
-  MPI_Allreduce(&ned, &nglobal_ed, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
-  // check whether uint64 edges can fit in 32bit CSC
+  /* get total number of remaining edges. katric: main() passed &ned, an int, as MPI_UINT64_T (read 8 bytes) */
+  {
+    uint64_t local_ed = (uint64_t)ned;
+    MPI_Allreduce(&local_ed, &nglobal_ed, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
+  }
   if (4 == sizeof(LOCINT)) {
     if (!verify_32bit_fit(edge, ned))
       MPI_Abort(MPI_COMM_WORLD, EXIT_FAILURE);
   }
 
-  if (myid == 0)
-    fprintf(stdout, "task %d, Creating CSC...", gmyid);
-  TIMER_START(0);
-
-  build_csc(edge, ned, &col, &row); // Make the CSC Structure
-  TIMER_STOP(0);
-  if (myid == 0)
-    fprintf(stdout, "task %d done in %f secs\n", gmyid,
-            TIMER_ELAPSED(0) / 1.0E+6);
+  build_csc(edge, ned, &lcc_col, &lcc_row);
   freeMem(edge);
   freeMem(deg);
+  freeMem(rem_edge);
 
-  MPI_Comm_split(MPI_COMM_CLUSTER, myrow, mycol, &Row_comm);
-  MPI_Comm_split(MPI_COMM_CLUSTER, mycol, myrow, &Col_comm);
-
-  // Allocate Degree array
-  degree = (LOCINT *)Malloc(col_bl * sizeof(*degree));
+  lcc_degree = (LOCINT *)Malloc(col_bl * sizeof(*lcc_degree));
   reach = (LOCINT *)Malloc(row_pp * sizeof(*reach));
-
-  dist_lcc = (float *)Malloc(
-      col_bl * sizeof(float)); // Local Cluster Coef... Store in scan mode
+  lcc_dist = (float *)Malloc(col_bl * sizeof(float)); /* Local Cluster Coef... Store in scan mode */
   if (heuristic == 1) {
-    // if(myid==0) printf("task %d edges removed %d ...\n",gmyid,rem_ed);
-    MPI_Allreduce(MPI_IN_PLACE, &rem_ed, 1, LOCINT_MPI, MPI_SUM,
-                  MPI_COMM_CLUSTER);
+    MPI_Allreduce(MPI_IN_PLACE, &rem_ed, 1, LOCINT_MPI, MPI_SUM, MPI_COMM_CLUSTER);
     MPI_Allreduce(MPI_IN_PLACE, reach, row_pp, MPI_INT, MPI_SUM, Row_comm);
-    if (myid == 0)
-      printf("task %d Total edges removed %d\n", gmyid, rem_ed);
   }
+}
 
-  // get_deg(degree);
-  // Calculate degree
-  // MPI_Allreduce(MPI_IN_PLACE, degree, col_bl, MPI_INT, MPI_SUM, Col_comm);
-  if (analyze_degree == 1)
-    analyze_deg(degree, col_bl);
-
-#ifdef _FINE_TIMINGS
-  // Allocate for statistical data
-  mystats = (STATDATA *)Malloc(N * sizeof(STATDATA));
-  memset(mystats, 0, N * sizeof(STATDATA));
+uint64_t lcc_count(void) {
+  uint64_t triangles = 0;
+  lcc_local_triangles = 0;
+#ifdef HAVE_SIMD
+  lcc_func_bin_simd(lcc_col, lcc_row, lcc_dist);
+#else
+  prexit("katric: lcc_count() needs the SIMD version (HAVE_SIMD), as in the paper.\n");
 #endif
+  MPI_Allreduce(&lcc_local_triangles, &triangles, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
+  return triangles / 3;
+}
 
-#ifdef SERIAL
- 
-if (myid == 0) fprintf(stdout, "Computing LCC [SERIAL] using %d process on %d core per process\n", ntask, 1);
-TIMER_START(0);
-lcc_func(col, row, dist_lcc);
-TIMER_STOP(0);
-
-#elif HAVE_SIMD
-  #pragma omp parallel private(threadnum, coremask, clbuf)
-  {
-      nthreads = omp_get_num_threads();
-      threadnum = omp_get_thread_num();
-      (void)sched_getaffinity(0, sizeof(coremask), &coremask);
-      cpuset_to_cstr(&coremask, clbuf);
-      #pragma omp barrier
-      if(debug == 1) {
-      fprintf(stdout, "Rank %d, using %d threads on %s: thread %d on core = %s.\n",
-      gmyid, nthreads, hnbuf, threadnum, clbuf);
-      }
-  }
-if (myid == 0) fprintf(stdout, "Computing LCC [BIN_SIMD] using %d process on %d core per process...", ntask, nthreads);
-TIMER_START(0);
-lcc_func_bin_simd(col, row, dist_lcc);
-TIMER_STOP(0);
-#endif
-
-
-if (myid == 0) fprintf(stdout, "done in %f secs on %d rank\n",TIMER_ELAPSED(0)/1.0E+6, myid);
-
-  MPI_Barrier(MPI_COMM_WORLD);
-  if (gmyid == 0) {
-    fprintf(stdout, "System summary:\n Total(gntask) GPUs %d - Total(fd) ntask "
-                    "%d - Total(fr)  cntask %d\n",
-            gntask, ntask, cntask);
-  }
-  MPI_Barrier(MPI_COMM_WORLD);
-  if (outdebug != NULL)
-    fclose(outdebug);
-  fprintf(stdout,
-          "WNODE Global-ID %d - Cluster-ID %d -  Local-ID %d ... closing\n",
-          gmyid, color, myid);
-  if (resname != NULL) {
-    FILE *resout = fopen(resname, "w");
-
-    LOCINT k;
-    for (k = 0; k < col_bl; k++) {
-      fprintf(resout, "%d\t%.2f\n", LOCJ2GJ(k), dist_lcc[k]);
-    }
-    fclose(resout);
-  }
-  MPI_Barrier(MPI_COMM_WORLD);
-  freeMem(col);
-  freeMem(row);
-  freeMem(mystats);
-  freeMem(gfile);
-  freeMem(degree);
+void lcc_free(void) {
+  freeMem(lcc_col);
+  freeMem(lcc_row);
+  freeMem(lcc_degree);
   freeMem(reach);
-  
-  MPI_Barrier(MPI_COMM_WORLD);
-  MPI_Barrier(Row_comm);
-  MPI_Barrier(Col_comm);
+  freeMem(lcc_dist);
+  lcc_col = lcc_row = lcc_degree = reach = NULL;
+  lcc_dist = NULL;
   MPI_Comm_free(&Row_comm);
   MPI_Comm_free(&Col_comm);
   MPI_Comm_free(&MPI_COMM_CLUSTER);
-
-#ifdef HAVE_LIBLSB
-  LSB_Finalize();
-#endif
-
-  MMPI_FINALIZE();
-  exit(EXIT_SUCCESS);
 }

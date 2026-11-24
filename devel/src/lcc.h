@@ -132,41 +132,7 @@ typedef struct
 
 
 
-#ifdef __cplusplus
-#define LINKAGE "C"
-#else
-#define LINKAGE
-#endif
-extern LINKAGE void init_bc_1degree_device(LOCINT *reach);
-
-extern LINKAGE void *Malloc(size_t sz);
-extern LINKAGE uint64_t compact(uint64_t *v, uint64_t ld, int *vnum, int n); 
-extern LINKAGE void prstat(uint64_t val, const char *msg, int det);
-extern LINKAGE void *CudaMallocHostSet(size_t size, int val); 
-extern LINKAGE void sort_by_degree(LOCINT *deg,LOCINT *bc_order);
-extern LINKAGE void dump_array2(int *arr, int n, const char *name);
-extern LINKAGE void dump_uarray2(LOCINT *arr, int n, const char *name);
-extern LINKAGE void dump_farray2(float *arr, int n, const char *name);
-
-//extern LOCINT N;    /* number of vertices: N */
-extern uint64_t    N;    /* number of vertices: N */
-extern LOCINT    row_bl; /* adjacency matrix rows per block: N/(RC) */
-extern LOCINT    col_bl; /* adjacency matrix columns per block: N/C */
-extern LOCINT    row_pp; /* adjacency matrix rows per proc: N/(RC) * C = N/R */
-
-extern int C;
-extern int R;
-extern int myid;
-extern int ntask;
-extern int mono;
-extern int heuristic;
-extern int myrow;
-extern int mycol;
-extern int pmesh[MAX_PROC_I][MAX_PROC_J];
-extern MPI_Comm Row_comm, Col_comm;
-extern FILE *outdebug;
-extern LOCINT *tlvl;
-extern LOCINT *tlvl_v1;
-extern uint64_t overlap_time; 
+/* katric: the extern declarations of lcc.c's globals and of the CUDA helpers removed; lcc.c defines them
+ * static (one translation unit, no symbols that could clash in katric's binary) */ 
 
 #endif
