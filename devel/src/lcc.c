@@ -646,12 +646,13 @@ static LOCINT degree_reduction(int myid, int ntask, uint64_t **ed,
       // This is required to solve the case when two vertices are connected
       // between them but
       // disconnected from all the others
-      while ((n_ed[2 * i] > o_ed[2 * pnod]) && (pnod < nod)) {
+      // katric: pnod < nod first (was second, so o_ed[2 * nod] past the end was read), also in the if below
+      while ((pnod < nod) && (n_ed[2 * i] > o_ed[2 * pnod])) {
         ncouple++;
         pnod++;
       }
 
-      if ((n_ed[2 * i] == o_ed[2 * pnod]) &&
+      if ((pnod < nod) && (n_ed[2 * i] == o_ed[2 * pnod]) &&
           (n_ed[2 * i + 1] == o_ed[2 * pnod + 1])) {
         pnod++;
         // skip this
