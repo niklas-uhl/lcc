@@ -12,7 +12,7 @@ if(NOT TARGET clampi::clampi)
   FetchContent_Declare(
     clampi
     GIT_REPOSITORY https://github.com/niklas-uhl/CLaMPI
-    GIT_TAG c4aa8180f430427109a231bb3e7fab2e06775826 # katric
+    GIT_TAG 82a4e6cd04585bd2a2e84445dee917cc20dfdbd5 # katric
     SYSTEM EXCLUDE_FROM_ALL)
   FetchContent_MakeAvailable(clampi)
 endif()

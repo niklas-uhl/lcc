@@ -1083,18 +1083,29 @@ static void lcc_func_bin_simd(LOCINT *col, LOCINT *row, float *output) {
   double mem_factor = MIN(1, row_mem_size / (double) non_local_size);
   uint64_t row_ht_entries = N * pow(mem_factor, 2);
 
+  /* katric: always-cache, which windows got with the published CLaMPI whatever was requested (its window mode
+   * bug, fixed on CLaMPI's katric branch, whose default is now the documented transparent mode: invalidate on every
+   * flush). The windows are read-only during the kernel, so caching across flushes is safe. */
+  MPI_Info clampi_info;
+  MPI_Info_create(&clampi_info);
+  MPI_Info_set(clampi_info, CLAMPI_MODE, CLAMPI_ALWAYS_CACHE);
+
   set_clampi_params(index_size, index_size / 2);
-  CMPI_Win_create(col, col_bl * sizeof(LOCINT), sizeof(LOCINT), MPI_INFO_NULL,
+  /* katric: (col_bl + 1) entries, was col_bl: the kernel gets col[v] and col[v + 1], one entry past the window for
+   * the last local vertex (MPI_ERR_RMA_RANGE with Open MPI) */
+  CMPI_Win_create(col, (col_bl + 1) * sizeof(LOCINT), sizeof(LOCINT), clampi_info,
                   Row_comm, &win_col);
 
   set_clampi_params(row_mem_size, row_ht_entries);
   CMPI_Win_create(row, col[col_bl] * sizeof(LOCINT), sizeof(LOCINT),
-                  MPI_INFO_NULL, Row_comm, &win_row);
+                  clampi_info, Row_comm, &win_row);
+  MPI_Info_free(&clampi_info);
 
   MMPI_WIN_LOCK_ALL(0, win_col.win);
   MMPI_WIN_LOCK_ALL(0, win_row.win);
 #else
-  MMPI_WIN_CREATE(col, col_bl * sizeof(LOCINT), sizeof(LOCINT), MPI_INFO_NULL,
+  /* katric: (col_bl + 1) entries, was col_bl (see above) */
+  MMPI_WIN_CREATE(col, (col_bl + 1) * sizeof(LOCINT), sizeof(LOCINT), MPI_INFO_NULL,
                   Row_comm, &win_col);
   MMPI_WIN_CREATE(row, col[col_bl] * sizeof(LOCINT), sizeof(LOCINT),
                   MPI_INFO_NULL, Row_comm, &win_row);
