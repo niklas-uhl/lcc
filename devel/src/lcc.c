@@ -581,6 +581,9 @@ static LOCINT degree_reduction(int myid, int ntask, uint64_t **ed,
 
   fprintf(stdout, "[rank %d] Memory allocated\n", myid);
 
+  // katric: nothing to scan on a rank without edges (nedge - 1 wrapped around, and the last-edge check read
+  // r_ed[-2]); the part_graph() calls below are collective and still run
+  if (nedge > 0) {
   for (i = 0; i < nedge - 1; i++) {
     u = r_ed[2 * i];
     v = r_ed[2 * i + 1]; // current is ( u,v )    next pair is next_u, next_t
@@ -617,6 +620,7 @@ static LOCINT degree_reduction(int myid, int ntask, uint64_t **ed,
     o_ed[2 * nod + 1] = u;
     nod++;
   }
+  } // katric: if (nedge > 0)
 
   fprintf(stdout, "[rank %d] Edges removed during fist step %lu\n", myid, nod);
   // 1-degree vertices (nod )removed
